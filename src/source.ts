@@ -65,12 +65,8 @@ class DirectorySource extends Source {
   }
 
   public bind(scope: Construct, context: SourceContext): SourceConfig {
-    let id = 1;
-    while (scope.node.tryFindChild(`Assets${id}`)) {
-      id += 1;
-    }
 
-    const asset = new ecr_assets.DockerImageAsset(scope, `Asset${id}`, {
+    const asset = new ecr_assets.DockerImageAsset(scope, 'asset', {
       directory: this.path,
     });
 
