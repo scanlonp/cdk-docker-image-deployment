@@ -94,4 +94,3 @@ class DirectorySource extends Source {
       imageTag: Fn.select(1, Fn.split(':', asset.imageUri)), // uri will be something like 'directory/of/image:tag' so this picks out the tag from the token
     };
   }
-}

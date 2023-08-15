@@ -603,7 +603,3 @@ Uses a local image built from a Dockerfile in a local directory as the source.
 path to the directory containing your Dockerfile (not a path to a file).
 
 ---
-
-
-
-
