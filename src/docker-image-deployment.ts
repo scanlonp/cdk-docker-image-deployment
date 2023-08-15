@@ -1,112 +1,144 @@
-//import * as path from 'path';
-import { Stack } from 'aws-cdk-lib';
+import * as path from 'path';
+import { CustomResource, Duration, CfnOutput, Token } from 'aws-cdk-lib';
 import * as codebuild from 'aws-cdk-lib/aws-codebuild';
-//import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import { Runtime } from 'aws-cdk-lib/aws-lambda';
+import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
-import { DestinationConfig } from './destination';
-import { ISource, SourceConfig } from './source';
-
+import { Destination } from './destination';
+import { Source } from './source';
 
 export interface DockerImageDeploymentProps {
   /**
-   * Source of image to deploy.
+   * Source of the image to deploy.
    */
-  readonly source: ISource;
+  readonly source: Source;
 
   /**
    * Destination repository to deploy the image to.
    */
-  readonly destination: DestinationConfig;
+  readonly destination: Destination;
 }
 
+/**
+ * `DockerImageDeployment` pushes an image from a local or external source to a specified external destination
+ */
 export class DockerImageDeployment extends Construct {
   private readonly cb: codebuild.Project;
 
   constructor(scope: Construct, id: string, props: DockerImageDeploymentProps) {
     super(scope, id);
 
-
-    const codebuildrole = new iam.Role(this, 'codebuildroleUniqueID', {
+    const handlerRole = new iam.Role(this, 'DockerImageDeployRole', {
       assumedBy: new iam.ServicePrincipal('codebuild.amazonaws.com'),
-      roleName: 'codebuildrole',
     });
-    codebuildrole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'ecr:BatchCheckLayerAvailability',
-        'ecr:CompleteLayerUpload',
-        'ecr:GetAuthorizationToken',
-        'ecr:InitiateLayerUpload',
-        'ecr:PutImage',
-        'ecr:UploadLayerPart',
-        'ecr:GetDownloadUrlForLayer',
-        'ecr:BatchGetImage',
-        'ecr:BatchCheckLayerAvailability',
-      ],
-      resources: ['*'],
-    }));
 
+    const sourceConfig = props.source.bind(this, { handlerRole });
+    const destinationConfig = props.destination.bind(handlerRole);
 
-    // should put these in a function
+    const sourceUri = sourceConfig.imageUri;
 
-    // is this necessary?
-    // try doing this without role
-    // is this the right role if the bind is needed?
-    const sourceConfig: SourceConfig = props?.source.bind(this, { handlerRole: codebuildrole });
-    const sourceURI: string = sourceConfig.imageURI;
+    const destTag = destinationConfig.destinationTag ?? sourceConfig.imageTag;
+    this.validateTag(destTag);
 
-    let destURI: string = props.destination.destinationURI + ':';
+    const destUri = `${destinationConfig.destinationUri}:${destTag}`;
 
-    if (props.destination.destinationTag === undefined) {
-      destURI += sourceConfig.imageTag;
-    } else {
-      destURI += props.destination.destinationTag;
-    }
-
-    // think about why we need these
-    // will there need to be a logout and login for pushing somewhere else - probably, can address with source / dest interfaces
-    const accountId: string = Stack.of(this).account;
-    const region: string = Stack.of(this).region;
-
-
-    const commandList = [
-      `aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${accountId}.dkr.ecr.${region}.amazonaws.com`,
-      `docker pull ${sourceURI}`,
-      `docker tag ${sourceURI} ${destURI}`,
-      `docker push ${destURI}`,
+    const commands = [
+      sourceConfig.loginConfig.loginCommand,
+      `docker pull ${sourceUri}`,
+      `docker tag ${sourceUri} ${destUri}`,
     ];
 
+    if (sourceConfig.loginConfig.region !== destinationConfig.loginConfig.region || !sourceConfig.loginConfig.region) { // different regions or either undefined should logout and login
+      commands.push('docker logout');
+      commands.push(destinationConfig.loginConfig.loginCommand);
+    }
 
-    // need to think about staging
-    this.cb = new codebuild.Project(this, 'codebuildUniqueID', {
+    commands.push(`docker push ${destUri}`);
+    commands.push('docker logout');
+
+    this.cb = new codebuild.Project(this, 'DockerImageDeployProject', {
       buildSpec: codebuild.BuildSpec.fromObject({
-        // version: '0.2'?
         version: '0.2',
         phases: {
           build: {
-            commands: commandList,
+            commands: commands,
           },
         },
       }),
-      environment: { privileged: true, buildImage: codebuild.LinuxBuildImage.STANDARD_5_0 },
-      role: codebuildrole,
-
-    });
-
-    new cr.AwsCustomResource(this, 'startcodebuildUniqueID', {
-      onCreate: {
-        service: 'CodeBuild',
-        action: 'startBuild',
-        parameters: {
-          projectName: this.cb.projectName,
-        },
-        physicalResourceId: cr.PhysicalResourceId.of(Date.now().toString()),
+      environment: {
+        privileged: true,
+        buildImage: codebuild.LinuxBuildImage.STANDARD_5_0,
       },
-      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
-        resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
-      }),
+      role: handlerRole,
     });
 
+    const onEventHandler = new lambda.NodejsFunction(this, 'onEventHandler', {
+      entry: path.join(__dirname, 'codebuild-handler/index.js'),
+      handler: 'onEventhandler',
+      runtime: Runtime.NODEJS_16_X,
+    });
+
+    const isCompleteHandler = new lambda.NodejsFunction(this, 'isCompleteHandler', {
+      entry: path.join(__dirname, 'codebuild-handler/index.js'),
+      handler: 'isCompleteHandler',
+      runtime: Runtime.NODEJS_16_X,
+    });
+
+    // https://github.com/aws/aws-cdk/issues/21721 issue to add grant methods to codebuild
+    const grantOnEvent = iam.Grant.addToPrincipal({
+      grantee: onEventHandler,
+      actions: ['codebuild:StartBuild'],
+      resourceArns: [this.cb.projectArn],
+      scope: this,
+    });
+
+    const grantIsComplete = iam.Grant.addToPrincipal({
+      grantee: isCompleteHandler,
+      actions: [
+        'codebuild:ListBuildsForProject',
+        'codebuild:BatchGetBuilds',
+      ],
+      resourceArns: [this.cb.projectArn],
+      scope: this,
+    });
+
+    const crProvider = new cr.Provider(this, 'CRProvider', {
+      onEventHandler: onEventHandler,
+      isCompleteHandler: isCompleteHandler,
+      queryInterval: Duration.seconds(30),
+      totalTimeout: Duration.minutes(30),
+    });
+
+    const customResource = new CustomResource(this, `CustomResource${Date.now().toString()}`, {
+      serviceToken: crProvider.serviceToken,
+      properties: {
+        projectName: this.cb.projectName,
+      },
+    });
+
+    customResource.node.addDependency(grantOnEvent, grantIsComplete);
+
+    try {
+      new CfnOutput(this, 'CustomResourceReport', {
+        value: `${customResource.getAttString('Status')}, see the logs here: ${customResource.getAtt('LogsUrl')}`,
+      });
+    } catch (error) {
+      throw new Error('Error getting the report from the custom resource');
+    }
+  }
+
+  private validateTag(tag: string): void {
+    if (Token.isUnresolved(tag)) {
+      return; // if token tag is likely from source, so assume it is valid
+    }
+    if (tag.length > 128) {
+      throw new Error (`Invalid tag: tags may contain a maximum of 128 characters; your tag ${tag} has ${tag.length} characters`);
+    }
+    if (!/^[^-.][a-zA-Z0-9-_.]+$/.test(tag)) {
+      throw new Error(`Invalid tag: tags must contain alphanumeric characters and \'-\' \'_\' \'.\' only and must not begin with \'.\' or \'-\'; your tag was ${tag}`);
+    }
   }
 }
+

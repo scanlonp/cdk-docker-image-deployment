@@ -1,14 +1,22 @@
-//import * as ecr from 'aws-cdk-lib/aws-ecr';
+import { Fn } from 'aws-cdk-lib';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import { LoginConfig } from './login';
 
-
+/**
+ * Source information
+ */
 export interface SourceConfig {
   /**
-   * The source imageURI.
+   * The source image URI.
    */
-  readonly imageURI: string;
+  readonly imageUri: string;
+
+  /**
+   * The login command and region.
+   */
+  readonly loginConfig: LoginConfig;
 
   /**
    * The source tag.
@@ -16,97 +24,74 @@ export interface SourceConfig {
   readonly imageTag: string;
 }
 
-// is this needed?
 /**
- * Bind context for ISources
+ * Bind context for Source
  */
-export interface DeploymentSourceContext {
+export interface SourceContext {
   /**
-   * The role for the handler
+   * The role for the handler.
    */
   readonly handlerRole: iam.IRole;
 }
 
-// needs to be called ISource since 'Interface contains behavior'
-export interface ISource {
+/**
+ * Specifies docker image deployment source
+ *
+ * Usage:
+ *
+ * ```ts
+ * import * as path from 'path';
+ * const path = path.join(__dirname, 'path/to/directory');
+ * const sourceDirectory = Source.directory(path);
+ * ```
+ *
+ */
+export abstract class Source {
   /**
-   * Binds the source to a docker image deployment.
-   * @param scope The construct tree context.
+   * Uses a local image built from a Dockerfile in a local directory as the source.
+   *
+   * @param path - path to the directory containing your Dockerfile (not a path to a file)
    */
-  bind(scope: Construct, context?: DeploymentSourceContext): SourceConfig;
+  public static directory(path: string): Source {
+    return new DirectorySource(path);
+  }
+
+  /**
+   * Bind grants the CodeBuild role permissions to pull from a repository if necessary.
+   * Bind should be invoked by the caller to get the SourceConfig.
+   */
+  public abstract bind(scope: Construct, context: SourceContext): SourceConfig;
 }
 
-export class Source {
-  public static directory(path: string): ISource { // TODO: add build props
+/**
+ * Source of docker image deployment is a local image from a directory
+ */
+class DirectorySource extends Source {
+  private path: string;
+
+  constructor(path: string) {
+    super();
+    this.path = path;
+  }
+
+  public bind(scope: Construct, context: SourceContext): SourceConfig {
+
+    const asset = new ecr_assets.DockerImageAsset(scope, 'asset', {
+      directory: this.path,
+    });
+
+    const accountId = asset.repository.env.account;
+    const region = asset.repository.env.region;
+
+    asset.repository.grantPull(context.handlerRole);
+
     return {
-      bind(scope: Construct, context?: DeploymentSourceContext): SourceConfig {
-        if (!context) {
-          throw new Error('To use a Source.directory(), context must be provided');
-        }
-
-        let id = 1;
-        while (scope.node.tryFindChild(`Assets${id}`)) {
-          id += 1;
-        }
-
-        const asset = new ecr_assets.DockerImageAsset(scope, `Asset${id}`, {
-          directory: path,
-        });
-
-        // does there need to be a validation check here? I dont think so since it will fail at synth time if image is not found at path
-
-        return {
-          imageURI: asset.imageUri,
-          imageTag: asset.assetHash,
-        };
+      imageUri: asset.imageUri,
+      loginConfig: {
+        loginCommand: `aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${accountId}.dkr.ecr.${region}.amazonaws.com`,
+        region: region,
       },
+      imageTag: Fn.select(1, Fn.split(':', asset.imageUri)), // uri will be something like 'directory/of/image:tag' so this picks out the tag from the token
     };
   }
-
-  // TODO: add more sources
-  /*
-  // untested
-  public static asset(asset: ecr_assets.DockerImageAsset): ISource {
-    return {
-      bind(_: Construct, context?: DeploymentSourceContext): SourceConfig {
-        if (!context) {
-          throw new Error('To use a Source.asset(), context must be provided');
-        }
-
-        return {
-          login: { sourceLocation: sourceLocations.ECR},
-          imageURI: asset.imageUri
-        };
-      },
-    };
-  }
-
-  // untested
-  public static ecr(repository: ecr.IRepository, tag: string): ISource {
-    return {
-      bind(_: Construct, context?: DeploymentSourceContext): SourceConfig {
-        if (!context) {
-          throw new Error('To use a Source.ecr(), context must be provided');
-        }
-
-        return {
-          login: { sourceLocation: sourceLocations.ECR, ecrRegion: repository.env.region ,ecrAccount: repository.env.account},
-          imageURI: repository.repositoryUriForTag(tag)
-        };
-      },
-    };
-  }
-
-  // this will need to do a completely different operation than directory, asset, and ecr
-  // needs to download tar/zip file
-  // load with docker load
-  // tag using name (might not be hard)
-  // then push
-
-  public s3(bucket: s3.IBucket, zipObjectKey: string): ISource {
-
-  }
-  */
-
-  private constructor () {}
 }
