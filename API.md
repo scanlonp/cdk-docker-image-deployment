@@ -496,7 +496,6 @@ Bind should be invoked by the caller to get the DestinationConfig.
 | **Name** | **Description** |
 | --- | --- |
 | <code><a href="#cdk-docker-image-deployment.Destination.ecr">ecr</a></code> | Uses an ECR repository in the same account as the stack as the destination for the image. |
-
 ---
 
 ##### `ecr` <a name="ecr" id="cdk-docker-image-deployment.Destination.ecr"></a>
@@ -603,7 +602,3 @@ Uses a local image built from a Dockerfile in a local directory as the source.
 path to the directory containing your Dockerfile (not a path to a file).
 
 ---
-
-
-
-
